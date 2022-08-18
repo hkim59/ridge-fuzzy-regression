@@ -7,7 +7,7 @@ Kim H, Jung H-Y. Ridge Fuzzy Regression Modelling for Solving Multicollinearity.
 --------------------------------------------------------------------------------
 
 - *Alpha_cut_regression.R*: performs fuzzy alpha-cut regression. 
-- *choose_alpha_Alpha_cut_regression.R*: chooses optimal alpha-level set for fuzzy alpha-cut regression base on RMSE.
+- *choose_alpha_Alpha_cut_regression.R*: chooses optimal alpha-level set for fuzzy alpha-cut regression based on RMSE.
 - *predict_Alpha_cut_regression.R*: performs fuzzy alpha-cut regression on new data.
 - *plot_Alpha_cut_regression.R*: code to generate appropriate plots for simulation & empirical study.
 - *simulation_study.R*: code to run simulation study in paper.
