@@ -1,0 +1,498 @@
+---
+title: 'Fuzzy Alpha-cut Linear Regression: MODIFIED TANAKA DATA'
+date: "2018/ 11/ 15"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+set.seed(1)
+library(tidyverse)
+library(usdm)
+library(glmnet)
+library(knitr)
+```
+
+```{r ridge function, include=FALSE}
+ridge_se <- function(xs,y,yhat,my_mod){
+  # Note, you can't estimate an intercept here
+  n <- dim(xs)[1]
+  k <- dim(xs)[2]
+  sigma_sq <- sum((y-yhat)^2)/ (n-k)
+  lam <- my_mod$lambda.min
+  if(is.null(my_mod$lambda.min)==TRUE){lam <- 0}
+  i_lams <- Matrix(diag(x=1,nrow=k,ncol=k),sparse=TRUE)
+  xpx <- t(xs)%*%xs
+  xpxinvplam <- solve(xpx+lam*i_lams)
+  var_cov <- sigma_sq * (xpxinvplam %*% xpx %*% xpxinvplam)
+  se_bs <- sqrt(diag(var_cov))
+  #print('NOTE: These standard errors are very biased.')
+  return(se_bs)
+}
+```
+
+We give an example to illustrate the mechanism of our fuzzy linear regression with $\alpha$-level loss function. The data presented below were taken from Hao and Chiang. 
+
+# TANAKA DATA, The House Price Example
+
+The example dataset is given below. 
+
+```{r}
+# Y is a fuzzy dataset. 
+y <- c(606, 710, 808, 826, 865, 852, 917, 1031, 
+       1092, 1203, 1394, 1420, 1601, 1632, 1699) # center of Dependent variable Y.
+s <- c(100, 50, 100, 150, 250, 200, 200, 250, 600,
+       100, 350, 250, 300, 500, 650) # spread of Dependent variable Y
+f_Y <- cbind(y-s, y, y+s)
+
+# Covariates x1, x2, x3 are crisp.
+x1 <- c(38.09, 62.10, 63.76, 74.52, 75.38, 52.99, 62.93, 
+        72.04, 76.12, 90.26, 85.70, 95.27, 105.98, 79.25, 120.50)
+x2 <- c(36.43, 26.50, 44.71, 38.09, 41.40, 26.49, 26.49, 33.12, 
+        43.06, 42.64, 31.33, 27.64, 27.64, 66.81, 32.25)
+x3 <- c(5, 6, 7, 8, 7, 4, 5, 6, 7, 7, 6, 6, 6, 6, 6)
+X <- cbind(x1, x2, x3)
+sX <- scale(X, center = TRUE, scale = TRUE)
+```
+
+One of the assumptions of linear regression is that there is no multicollinearity between the explanatory variables. Multicollinearity can be detected in the following ways. 
+
+1. The pairwise correlation between the explanatory variables shows that the variables are not highly correlated to each other.  
+
+```{r}
+cor(X) 
+```
+
+2. As the collinearity of $X_j$ with the other regressors increases, VIF also increases. As a rule of thumb, if the VIF of a variable > 5, that variable is said to be highly collinear. 
+The results show multicollinearity is not an issue for the TANAKA dataset ($X_1, X_2, X_3$ VIF values < 2).
+
+```{r}
+vif(as.data.frame(X))
+```
+
+## STEP 1. 
+
+Create an $\alpha$ - level of the dependent variable Y. The set of $\alpha$ - levels is given by $A = \{1, 0.75, 0.5, 0.25, 0\}$.
+
+```{r}
+A <- c(1, 0.75, 0.5, 0.25, 0)
+len.A <- length(A)
+
+n <- length(y)
+p <- ncol(X)
+
+l_Y <- matrix(NA, nrow = n, ncol = len.A)
+r_Y <- matrix(NA, nrow = n, ncol = len.A)
+
+for (a in 1:len.A) {
+  x_L <- s*A[a] + y - s
+  x_R <- -s*A[a] + y + s
+
+  l_Y[, a] <- x_L
+  r_Y[, a] <- x_R
+}
+
+colnames(l_Y) <- c("l_Y(1)", "l_Y(0.75)", "l_Y(0.5)", "l_Y(0.25)", "l_Y(0)")
+colnames(r_Y) <- c("r_Y(1)", "r_Y(0.75)", "r_Y(0.5)", "r_Y(0.25)", "r_Y(0)")
+```
+
+```{r}
+l_Y
+r_Y
+```
+
+## STEP 2. - STEP 5.
+
+Regress $y$ on $X_1, X_2, X_3, X_4, X_5$ to find the estimator $\hat{l_{A_{k}}}(\alpha)$, and $\hat{r_{A_{k}}}(\alpha)$ for each $k = 1, \cdots, p$ and $\alpha \in A$. 
+First obtain the intermediate estimators $\bar{l_{A_{k}}}(\alpha)$, and $\bar{r_{A_{k}}}(\alpha)$.
+
+
+```{r, warning = FALSE}
+l_Ak <- matrix(NA, nrow = p + 1, ncol = len.A)
+r_Ak <- matrix(NA, nrow = p + 1, ncol = len.A)
+
+l_Ak_var <- matrix(NA, nrow = p, ncol = len.A)
+r_Ak_var <- matrix(NA, nrow = p, ncol = len.A)
+
+
+for (a in 1:len.A) {
+  # estimated fuzzy regression coefficients using glmnet.
+  l_fit <- glmnet(X, l_Y[, a], alpha = 0, lambda = 0)
+  r_fit <- glmnet(X, r_Y[, a], alpha = 0, lambda = 0)
+  
+  l_Ak[, a] <- as.matrix(coef(l_fit))
+  r_Ak[, a] <- as.matrix(coef(r_fit))
+  
+  # std. errors for the estimated ridge fuzzy regression coefficients
+  l_yhat   <- predict(l_fit, newx = X, s='lambda.min')
+  r_yhat   <- predict(r_fit, newx = X, s='lambda.min')
+  
+  l_Ak_var[, a]   <- ridge_se(sX , y, l_yhat, l_fit)
+  r_Ak_var[, a]   <- ridge_se(sX , y, r_yhat, r_fit)
+  
+  #l_summary <- summary(lm (l_Y[, a] ~ X))
+  #r_summary <- summary(lm (r_Y[, a] ~ X))
+  
+  #l_Ak[, a] <- l_summary$coefficients[, 1] # Linear regression on X
+  #r_Ak[, a] <- r_summary$coefficients[, 1]
+  
+  #l_Ak_var[, a] <- l_summary$coefficients[, 2]
+  #r_Ak_var[, a] <- r_summary$coefficients[, 2]
+  
+  #betas_L[2:(p+1), a] <- lm (cY_L[, a] ~ sX)$coef[-1] # Linear regression on standardized X
+  #betas_L[2:(p+1), a] <- betas_L[2:(p+1), a] / scaleX
+  #betas_L[1,a] <- mean(Y_L[, a]) - betas_L[2:(p+1), a] %*% colMeans(X)  # Intercept
+  
+  #betas_R[2:(p+1), a] <- lm (cY_R[, a] ~ sX)$coef[-1]
+  #betas_R[2:(p+1), a] <- betas_R[2:(p+1), a] / scaleX
+  #betas_R[1,a] <- mean(Y_R[, a]) - betas_R[2:(p+1), a] %*% colMeans(X)  # Intercept
+}
+
+colnames(l_Ak) <- c("alpha = 1", "alpha = 0.75", "alpha = 0.5", "alpha = 0.25", "alpha = 0")
+rownames(l_Ak) <- c("Intercept", "l_A1", "l_A2", "l_A3")
+
+colnames(r_Ak) <- c("alpha = 1", "alpha = 0.75", "alpha = 0.5", "alpha = 0.25", "alpha = 0")
+rownames(r_Ak) <- c("Intercept", "r_A1", "r_A2", "r_A3")
+
+colnames(l_Ak_var) <- c("alpha = 1", "alpha = 0.75", "alpha = 0.5", "alpha = 0.25", "alpha = 0")
+rownames(l_Ak_var) <- c("l_A1", "l_A2", "l_A3")
+
+colnames(r_Ak_var) <- c("alpha = 1", "alpha = 0.75", "alpha = 0.5", "alpha = 0.25", "alpha = 0")
+rownames(r_Ak_var) <- c("r_A1", "r_A2", "r_A3")
+```
+
+```{r}
+l_Ak
+r_Ak
+```
+A Summary of the obtained  above results in tabular is given below. 
+
+```{r, echo = FALSE}
+l_summary <- cbind(t(l_Ak)[, 2], t(l_Ak_var)[, 1],
+                   t(l_Ak)[, 3], t(l_Ak_var)[, 2],
+                   t(l_Ak)[, 4], t(l_Ak_var)[, 3])
+colnames(l_summary) <- c("l_A1 Estimate", "l_A1 Std.Error",
+                         "l_A2 Estimate", "l_A2 Std.Error",
+                         "l_A3 Estimate", "l_A3 Std.Error")
+
+r_summary <- cbind(t(r_Ak)[, 2], t(r_Ak_var)[, 1],
+                   t(r_Ak)[, 3], t(r_Ak_var)[, 2],
+                   t(r_Ak)[, 4], t(r_Ak_var)[, 3])
+colnames(r_summary) <- c("r_A1 Estimate", "r_A1 Std.Error",
+                         "r_A2 Estimate", "r_A2 Std.Error",
+                         "r_A3 Estimate", "r_A3 Std.Error")
+kable(l_summary, caption = "Summary of l_Ak")
+kable(r_summary, caption = "Summary of r_Ak")
+```
+
+Modify the intermediate estimators $\bar{l_{A_{k}}}(\alpha)$, and $\bar{r_{A_{k}}}(\alpha)$ so that the estimated coefficients form a pre-defined shape of the membership function. 
+
+For each $A_k$, $k = 1, \cdots, p$, compare the $\alpha$ - levels with that of the previous level, i.e., use the *min* and *max* operators to obtain $\hat{l_{A_{k}}}(\alpha)$, and $\hat{r_{A_{k}}}(\alpha)$ for each $k = 1, \cdots, p$. Note that we do not modify the intercept.
+
+
+```{r}
+#l_A0 <- c(l_Ak[1,], r_Ak[1,]) # Keep the intercepts for late use.
+#temp_l_Ak <- l_Ak[-1, ]
+#temp_r_Ak <- r_Ak[-1, ]
+
+temp_l_Ak <- l_Ak
+temp_r_Ak <- r_Ak
+
+for (i in 1:(p + 1)) {
+  for (j in 2:len.A) {
+    temp_l_Ak[i, j] <-  ifelse(temp_l_Ak[i, j] <= temp_l_Ak[i, j-1], temp_l_Ak[i, j], temp_l_Ak[i, j-1])
+    temp_r_Ak[i, j] <-  ifelse(temp_r_Ak[i, j] >= temp_r_Ak[i, j-1], temp_r_Ak[i, j], temp_r_Ak[i, j-1])
+  }
+}
+
+temp_lr_Ak <- data.frame(t(temp_l_Ak), t(temp_r_Ak))
+```
+
+```{r}
+temp_lr_Ak
+```
+
+## STEP 6. 
+
+Find the membership function $\mu_{A_{k}}(x)$ for the fuzzy regression coefficients $A_{k}$, $k = 1, \cdots, p$ by performing linear regression on the estimated $\alpha$ -level sets $\hat{A_{k}}(\alpha_j) = [\hat{l_{A_{k}}}(\alpha_j), \hat{r_{A_{k}}}(\alpha_j)]$, for all $\alpha \in A$. Give constraints so that the top of the pre-defined membership function satisfy the condition of $\alpha$ - level 1.
+
+### 1. 
+Find each of the left and right slopes for the pre-defined membership function. 
+
+```{r}
+(lr_Ak <- data.frame(y = A, 
+                    temp_lr_Ak))
+```
+
+```{r}
+slopes <- matrix(NA, nrow = (p + 1), ncol = 3)
+
+for (i in 1:(p + 1)) {
+  # left slope
+  slopes[i, 1] <- lm(I(lr_Ak[, 1] - lr_Ak[1, 1]) ~ I(lr_Ak[, (i + 1)] - lr_Ak[1, (i + 1)]) + 0)$coef 
+  # center value
+  slopes[i, 2] <- lr_Ak[1, (i + 1)]  #### changed!! 
+  # right slope
+  slopes[i, 3] <- lm(I(lr_Ak[, 1] - lr_Ak[1, 1]) ~ I(lr_Ak[, (i + p + 2)] - lr_Ak[1, (i + p + 2)]) + 0)$coef 
+}
+
+rownames(slopes) <- c("Intercept", "A1", "A2", "A3")
+colnames(slopes) <- c("left.slope", "Ak(1)","right.slope")
+```
+
+```{r}
+slopes
+```
+
+### 2. 
+Choose the left or the right slope based on MSE. 
+
+(1) Choose the left/right slope then make symmetric
+
+```{r}
+# Choose the left slope then make symmetric
+l_slopes <- cbind(slopes[,1], slopes[,2], -slopes[,1])
+colnames(l_slopes) <- c("left.slope", "Ak(1)","right.slope")
+
+# Choose the right slope then make symmetric
+r_slopes <- cbind(-slopes[,3], slopes[,2], slopes[,3])
+colnames(r_slopes) <- c("left.slope", "Ak(1)","right.slope")
+```
+
+(2) Compute $\hat{l_{A_{k}}}(0)$, and $\hat{r_{A_{k}}}(0)$ for each methods using the obtained slope for the pre-defined membership function. 
+
+```{r}
+# The left slope chosen.
+l_f_Ak <- matrix(NA, nrow = (p + 1), ncol = 3)
+
+for (i in 1:(p + 1)) {
+  l_f_Ak[i, 1] <- l_slopes[i,2] - (1 / l_slopes[i,1])
+  l_f_Ak[i, 2] <- l_slopes[i,2]
+  l_f_Ak[i, 3] <- l_slopes[i,2] - (1 / l_slopes[i,3]) 
+  
+  l_f_Ak[is.na(l_f_Ak)] <- l_f_Ak[i,2] # Fill in NA values
+}
+
+rownames(l_f_Ak) <- c("Intercept", "A1", "A2", "A3")
+colnames(l_f_Ak) <- c("l_Ak(0)", "Ak(1)", "r_Ak(0)")
+
+# The right slope chosen.
+r_f_Ak <- matrix(NA, nrow = (p + 1), ncol = 3)
+
+for (i in 1:(p + 1)) {
+  r_f_Ak[i, 1] <- r_slopes[i,2] - (1 / r_slopes[i,1])
+  r_f_Ak[i, 2] <- r_slopes[i,2]
+  r_f_Ak[i, 3] <- r_slopes[i,2] - (1 / r_slopes[i,3]) 
+  
+  r_f_Ak[is.na(r_f_Ak)] <- r_f_Ak[i,2] # Fill in NA values
+}
+
+rownames(r_f_Ak) <- c("Intercept", "A1", "A2", "A3")
+colnames(r_f_Ak) <- c("l_Ak(0)", "Ak(1)", "r_Ak(0)")
+
+```
+
+```{r}
+l_f_Ak
+r_f_Ak
+```
+
+To be sure, compare with the results from `lm`. 
+
+```{r, warning=FALSE}
+coef(lm(y ~ X))
+```
+
+(3) Compute the fuzzy predicted values for each of the methods. Note that since we defined the fuzzy regression coefficients as symmetric, the fuzzy predicted values are symmetric as well. 
+
+```{r}
+# Calculate the intercept
+#f_1 <- cbind(rep(1, n) * l_A0[len.A], rep(1, n) * l_A0[1], rep(1, n) * l_A0[2*len.A]) # 1 * beta0 
+# Calculate fuzzy predicted values for the left slope chosen.
+f_1  <- cbind(rep(1, n) * l_f_Ak[1, 1], rep(1, n) * l_f_Ak[1, 2], rep(1, n) * l_f_Ak[1, 3])
+f_XL <- X %*% l_f_Ak[2:(p+1), 1]
+f_XC <- X %*% l_f_Ak[2:(p+1), 2]
+f_XR <- X %*% l_f_Ak[2:(p+1), 3]
+
+f_X <- cbind(f_XL, f_XC, f_XR)
+(l_f_Yhat <- f_1 + f_X) 
+
+# Calculate fuzzy predicted values for the right slope chosen.
+f_1  <- cbind(rep(1, n) * r_f_Ak[1, 1], rep(1, n) * r_f_Ak[1, 2], rep(1, n) * r_f_Ak[1, 3])
+f_XL <- X %*% r_f_Ak[2:(p+1), 1]
+f_XC <- X %*% r_f_Ak[2:(p+1), 2]
+f_XR <- X %*% r_f_Ak[2:(p+1), 3]
+
+f_X <- cbind(f_XL, f_XC, f_XR)
+(r_f_Yhat <- f_1 + f_X) 
+```
+
+To be sure, compare the mid-values of the fuzzy predicted values with the predicted values from `lm`. 
+
+```{r, warning=FALSE}
+predict(lm(y ~ X))
+```
+
+(4) Compute RMSE and MAPE for between the observed fuzzy values $Y$ and the fitted fuzzy values $\hat{Y}$ for each of the two methods, respectively.
+
+```{r}
+### The left slope chosen
+# RMSE
+(RMSE <- sqrt(sum(rowSums((f_Y - l_f_Yhat)^2)) / n))
+
+# MAPE
+f_diff <- f_Y - l_f_Yhat
+for (i in 1:3) {
+  f_diff[,i] <- abs(f_diff[,i] / f_Y[,i])
+}
+
+(MAPE <- sum(rowSums(f_diff))/n)
+
+### The right slope chosen
+# RMSE
+(RMSE <- sqrt(sum(rowSums((f_Y - r_f_Yhat)^2)) / n))
+
+# MAPE
+f_diff <- f_Y - r_f_Yhat
+for (i in 1:3) {
+  f_diff[,i] <- abs(f_diff[,i] / f_Y[,i])
+}
+
+(MAPE <- sum(rowSums(f_diff))/n)
+```
+
+Since for the fuzzy linear regression the RMSE and MAPE for the right slope is the same, we choose the left slope, then perform symmetrization. 
+
+Finally, plot each of the fuzzy regression coefficients. 
+
+```{r betas, cache= TRUE}
+par(mfrow = c(2,2))
+
+for (i in 1:(p + 1)) {
+  left.slope <- function(x) {l_slopes[i,1] * (x - l_slopes[i,2]) + 1}
+  right.slope <- function(x) {l_slopes[i,3] * (x - l_slopes[i,2]) + 1}
+  
+  min_x <- r_f_Ak[i, 1] 
+  max_x <- r_f_Ak[i, 3] 
+  
+  x_left <- c(min_x, l_f_Ak[i, 2])
+  x_right <- c(l_f_Ak[i, 2], max_x)
+  x <- c(x_left, x_right)
+  
+  #beta_triangle <- cbind(x, c(left(x_left), right(x_right))) 
+  #beta_triangle <- as.tibble(beta_triangle)
+  #colnames(beta_triangle) <- c("x", "y")
+  #
+  #q <- ggplot(beta_triangle, aes(x, y)) +
+  #  geom_line() +
+  #  xlim(min_x, max_x) +
+  #  ylim(0, 1) +
+  #  geom_vline(xintercept =  coef[i,2], aes(colour = "red")) +
+  #  labs(title = str_c("beta", i - 1),
+  #     x = "Lambdas",
+  #     y = "Coefficients") +
+  #  theme(panel.background = element_rect(fill = "white", colour = "grey50"))
+  #
+  #print(q)
+  
+  plot(x, c(left.slope(x_left), right.slope(x_right)), type = "l", 
+       xlim = c(min_x, max_x), ylim = c(0, 1),
+       main = str_c("l_A", i-1), ylab = " ", xlab = "values")
+  abline(v = l_slopes[i,2], col = "dodgerblue4")
+}
+
+```
+
+### Fuzzy Predicted Values 
+
+Using the fuzzy regression coefficients we have estimated above, we can compute the fuzzy predicted values as well. Note that since we defined the fuzzy regression coefficients as symmetric, the fuzzy predicted values are symmetric as well. 
+
+```{r}
+f_1  <- cbind(rep(1, n) * r_f_Ak[1, 1], rep(1, n) * r_f_Ak[1, 2], rep(1, n) * l_f_Ak[1, 3])
+f_XL <- X %*% l_f_Ak[2:(p+1), 1]
+f_XC <- X %*% l_f_Ak[2:(p+1), 2]
+f_XR <- X %*% l_f_Ak[2:(p+1), 3]
+
+f_X <- cbind(f_XL, f_XC, f_XR)
+(f_Yhat <- f_1 + f_X) 
+```
+
+```{r}
+f_Yhat[,3] - f_Yhat[,2]
+f_Yhat[,2] - f_Yhat[,1]
+```
+
+```{r}
+f_Y
+```
+
+Compute RMSE and MAPE for between the observed fuzzy values $Y$ and the fitted fuzzy values $\hat{Y}$.
+
+```{r}
+### The left slope chosen
+# RMSE
+(RMSE <- sqrt(sum(rowSums((f_Y - f_Yhat)^2)) / n))
+
+# MAPE
+f_diff <- f_Y - f_Yhat
+for (i in 1:3) {
+  f_diff[,i] <- abs(f_diff[,i] / f_Y[,i])
+}
+
+(MAPE <- sum(rowSums(f_diff))/n)
+```
+
+The plot of the observed values and the fitted values is shown below. 
+
+```{r, cache=TRUE, echo=FALSE, warning = FALSE}
+y_df = data.frame(x = c(0.5,1,0.5,
+                   1.5,2,1.5,
+                   2.5,3,2.5,
+                   3.5,4,3.5,
+                   4.5,5,4.5,
+                   5.5,6,5.5,
+                   6.5,7,6.5,
+                   7.5,8,7.5,
+                   8.5,9,8.5,
+                   9.5,10,9.5,
+                   10.5,11,10.5,
+                   11.5,12,11.5,
+                   12.5,13,12.5,
+                   13.5,14,13.5,
+                   14.5,15,14.5), 
+               y = as.vector(t(f_Y)),
+               grp = rep(1:15, each = 3))
+
+lm_y_df = data.frame(x = c(0.5,1,0.5,
+                   1.5,2,1.5,
+                   2.5,3,2.5,
+                   3.5,4,3.5,
+                   4.5,5,4.5,
+                   5.5,6,5.5,
+                   6.5,7,6.5,
+                   7.5,8,7.5,
+                   8.5,9,8.5,
+                   9.5,10,9.5,
+                   10.5,11,10.5,
+                   11.5,12,11.5,
+                   12.5,13,12.5,
+                   13.5,14,13.5,
+                   14.5,15,14.5), 
+               y = as.vector(t(f_Yhat)), 
+               grp = rep(1:15, each = 3))
+
+q = ggplot()
+for(g in unique(y_df$grp)){
+  dat1 = subset(y_df, grp == g)
+  dat2 = subset(lm_y_df, grp == g)
+  
+  q = q + geom_polygon(data = dat1, aes(x, y, alpha=0.6), colour="grey20", fill=NA) + 
+    geom_polygon(data = dat2, aes(x, y, alpha=0.6), colour="dodgerblue4", fill=NA) +
+    ylim(0, 3000) +
+    theme_bw() + 
+    labs(x = "index", y = "values") 
+}
+print(q)
+
+
+```
